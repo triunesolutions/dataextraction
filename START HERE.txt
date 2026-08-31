@@ -1,0 +1,55 @@
+========================================================
+  HVAC SCHEDULE EXTRACTOR (Groq)  -  START HERE
+========================================================
+
+WHAT THIS DOES
+  Reads your HVAC PDF drawings and makes a spreadsheet of
+  the equipment schedules (tag, manufacturer, model, size)
+  plus the project team directory.
+  No huge download - it uses the Groq cloud AI (free tier).
+
+
+--------------------------------------------------------
+  FIRST TIME ONLY  (do these 2 things once)
+--------------------------------------------------------
+
+  1. Install Python:  https://www.python.org/downloads/
+     IMPORTANT: on the first screen, tick "Add Python to PATH".
+
+  2. Get a FREE Groq API key:
+        a) Go to   https://console.groq.com/keys
+        b) Sign in (Google / GitHub / email)
+        c) Click "Create API Key", name it anything
+        d) Copy the key - it starts with  gsk_
+
+  3. Double-click:  setup.bat
+     It installs what's needed and asks you to paste the key.
+
+
+--------------------------------------------------------
+  EVERY TIME YOU WANT TO EXTRACT DATA
+--------------------------------------------------------
+
+  DRAG the folder that has your PDFs onto:  run.bat
+  (or double-click run.bat and paste the folder path)
+
+  When it finishes, open these files in this folder:
+     hvac.csv        = all the equipment
+     hvac_team.csv   = the project team / directory
+
+
+--------------------------------------------------------
+  IF SOMETHING GOES WRONG
+--------------------------------------------------------
+
+  - "python is not recognized" -> reinstall Python and TICK
+    "Add Python to PATH", then run setup.bat again.
+
+  - "no GROQ_API_KEY" / 401 -> your key is missing or wrong.
+    Edit .env in Notepad and paste a valid key (gsk_...).
+
+  - A PDF shows up as "needs_ocr" -> it's a scanned image
+    with no readable text; it has to be OCR'd first.
+
+  Questions? Ask whoever sent you this file.
+========================================================
