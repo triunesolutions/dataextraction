@@ -29,33 +29,30 @@ _METADATA_SYSTEM = (
     "city/state/zip, phone, contact person, email when shown. The 'firm' is the company "
     "name only — do not append stray words like 'KEYPLAN' or 'SHEET INDEX'.\n"
     "\n"
-    "Only use information present in the text. Use null for anything not stated. Do not guess."
+    "Only use information present in the text. Use null for anything not stated. Do not guess. "
+    "Ignore equipment schedule rows when determining project metadata; schedule titles, equipment "
+    "tags, model numbers, and capacities are not project metadata."
 )
 
 _EQUIPMENT_SYSTEM = (
-    "You read ONE page of a mechanical (HVAC) construction drawing that contains equipment "
-    "schedules (tables of equipment). Extract every equipment row.\n"
-    "\n"
-    "For each row, fill these fields EXACTLY as defined — do not mix them up:\n"
-    "- schedule: the TABLE TITLE only, e.g. 'FAN COIL UNIT SCHEDULE' or "
-    "'GRILLES, REGISTERS AND DIFFUSERS SCHEDULE'. NEVER put a room name, a location, "
-    "or the row's own data in this field.\n"
-    "- tag: the mark/tag in the first column, e.g. 'FC-1', 'CL-1K', 'R6L1'. "
-    "Keep ranges as one row (e.g. 'RG-1 THRU RG-7').\n"
-    "- manufacturer: the BRAND only, e.g. 'DAIKIN', 'TITUS', 'GREENHECK'. "
-    "Do NOT include the model here.\n"
-    "- model: the model/part number ONLY, e.g. 'FXAQ07PVIU', '50F', 'TDC'. "
-    "Do NOT repeat the manufacturer inside this field.\n"
-    "- size_capacity: size or capacity, e.g. '0.6 ton', '260 CFM', '24x24', '7.5 ton'. "
-    "Combine multiple with commas.\n"
-    "\n"
-    "Example — table titled 'FAN COIL UNIT SCHEDULE' with row "
-    "'CL-1K  MECH RM 107  DAIKIN  FXAQ07PVIU  0.6 ton  260 CFM' becomes:\n"
-    '{"schedule":"FAN COIL UNIT SCHEDULE","tag":"CL-1K","manufacturer":"DAIKIN",'
-    '"model":"FXAQ07PVIU","size_capacity":"0.6 ton, 260 CFM"}\n'
-    "\n"
-    "Copy values verbatim. Use null for a blank cell. Return an empty list if this page "
-    "has no equipment schedule."
+    "You extract HVAC equipment from ONE isolated equipment-schedule TABLE BLOCK. "
+    "The Python code has already separated this block from other schedule tables on the page. "
+    "Your job is to extract only rows that belong to the schedule title supplied below.\\n\\n"
+    "Field rules — follow these exactly:\\n"
+    "- schedule: MUST be exactly the supplied schedule title. Never rename it, infer a "
+    "different schedule, use a room/location, or use a title from another table.\\n"
+    "- tag: equipment mark/tag exactly as printed, e.g. 'FC-1', 'RTU-7', 'RG-1 THRU RG-7'. "
+    "This is required whenever a tag is visibly present. Keep ranges as one row.\\n"
+    "- manufacturer: brand only, e.g. 'DAIKIN', 'TITUS', 'GREENHECK'. Do not put the model here.\\n"
+    "- model: model/part number only. Do not repeat the manufacturer.\\n"
+    "- size_capacity: size/capacity values such as '0.6 ton', '260 CFM', '24x24', '7.5 ton'. "
+    "Combine multiple applicable values with commas.\\n"
+    "- Ignore column headers, notes, footnotes, blank rows, and rows that clearly belong to "
+    "a different table.\\n"
+    "- Do not invent missing values. Use null for a blank cell.\\n"
+    "- If the table contains no actual equipment rows, return an empty list.\\n\\n"
+    "Important: table attribution is more important than filling a field. Never move a row "
+    "from another schedule into this one just because its columns look similar.\\n"
 )
 
 
@@ -207,8 +204,13 @@ def _select_pages(pages: List[str]) -> tuple[List[int], List[int]]:
         sched_targets = sched
 
     cover = [i for i, t in enumerate(pages) if _is_cover_page(t)]
+
+    # Metadata should come primarily from the cover/title sheets. The previous
+    # logic could feed a mechanical schedule page into the metadata pass before
+    # some title pages, which increased the chance of mixing drawing/schedule
+    # values into project metadata.
     ordered: List[int] = []
-    for i in cover + ([0] if pages else []) + (mech[:1] if mech else []):
+    for i in cover + list(range(min(len(pages), config.METADATA_PAGES))) + (mech[:1] if not cover else []):
         if i not in ordered:
             ordered.append(i)
     meta = ordered[: config.METADATA_PAGES]
@@ -230,30 +232,9 @@ def _extract_metadata(head: str) -> ProjectMetadata:
 
 
 def _extract_equipment_page(page_text: str) -> List[Equipment]:
-    text = page_text
-    if len(text) > 10000:
-        upper = text.upper()
-        first_pos = -1
-        for kw in config.SCHEDULE_KEYWORDS:
-            pos = upper.find(kw)
-            if pos != -1 and (first_pos == -1 or pos < first_pos):
-                first_pos = pos
-        if first_pos != -1:
-            start = max(0, first_pos - 500)
-            text = text[start:start + 10000]
-        else:
-            text = text[:10000]
-
-    prompt = "Extract every equipment schedule row from this page:\n\n" + text
+    prompt = "Extract every equipment schedule row from this page:\n\n" + page_text
     data = _chat_json(_EQUIPMENT_SYSTEM, prompt, EquipmentPage.model_json_schema())
-    items: List[Equipment] = []
-    for raw in data.get("equipment", []):
-        try:
-            if isinstance(raw, dict):
-                items.append(Equipment.model_validate(raw))
-        except Exception:
-            continue
-    return items
+    return EquipmentPage.model_validate(data).equipment
 
 
 def _dedupe(rows: List[Equipment]) -> List[Equipment]:

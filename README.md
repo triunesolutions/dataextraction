@@ -74,6 +74,23 @@ folders ─▶ walk for *.pdf ─▶ hash (skip if already done)
 - **Scanned PDFs** (no text layer) are flagged `needs_ocr` instead of producing
   garbage rows.
 
+
+### Equipment extraction accuracy
+
+The equipment pass now separates a mechanical page into individual schedule-table
+blocks before sending them to the model. Each block is extracted with its exact
+schedule title locked in, so a row from (for example) a **FAN SCHEDULE** cannot be
+labelled as coming from a **PUMP SCHEDULE** simply because the columns look similar.
+
+The extraction also explicitly treats the **tag/mark as a first-class field** and
+keeps manufacturer, model, and size/capacity separate. If a PDF's text layer does
+not expose a recognizable schedule title, the code falls back to page-level
+extraction and tells the model not to guess the source schedule.
+
+The metadata pass is also prioritized around cover/title sheets rather than feeding
+a mechanical schedule page into the metadata prompt unnecessarily. This reduces
+cross-contamination between project metadata and equipment-table values.
+
 ## Output columns
 
 **`hvac.csv`** — the main equipment list:
