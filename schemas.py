@@ -7,8 +7,8 @@ from pydantic import BaseModel, Field
 
 
 class Equipment(BaseModel):
-    schedule: Optional[str] = Field(default="SCHEDULE", description="The schedule title this row came from, e.g. 'FAN SCHEDULE'")
-    tag: Optional[str] = Field(default=None, description="Equipment tag / mark exactly as printed, e.g. 'RTU-7' or 'RG-1 THRU RG-7'")
+    schedule: str = Field(description="The schedule title this row came from, e.g. 'FAN SCHEDULE'")
+    tag: str = Field(description="Equipment tag / mark exactly as printed, e.g. 'RTU-7' or 'RG-1 THRU RG-7'")
     manufacturer: Optional[str] = Field(default=None, description="Manufacturer / basis-of-design brand")
     model: Optional[str] = Field(default=None, description="Model number as printed")
     size_capacity: Optional[str] = Field(default=None, description="Size or capacity, e.g. '2,400 CFM' or '7.5 ton'")
@@ -20,8 +20,7 @@ class EquipmentPage(BaseModel):
 
 
 class TeamMember(BaseModel):
-    role: Optional[str] = Field(
-        default="Consultant",
+    role: str = Field(
         description="Role in the project, e.g. 'Owner', 'Architect of Record', "
         "'Civil Engineer', 'Structural Engineer', 'Mechanical Engineer', 'MEP Engineer'"
     )

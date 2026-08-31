@@ -96,10 +96,21 @@ def main() -> int:
 
     counts = {"ok": 0, "needs_ocr": 0, "error": 0, "skipped": 0}
     processed = 0
+    all_hashes: set[str] = set()
 
     for i, path in enumerate(pdfs, 1):
         file_hash = sha256(path)
+        all_hashes.add(file_hash)
         if not args.force and db.already_done(conn, file_hash):
+            # TEMPORARY DEBUG - remove once the skip-condition investigation is done.
+            row = conn.execute(
+                "SELECT status, processed_at FROM files WHERE file_hash = ?", (file_hash,)
+            ).fetchone()
+            print(
+                f"[DEBUG-SKIP] {path.name}: file_hash {file_hash[:12]}... already recorded "
+                f"in {args.db} as status='{row[0]}' (processed_at={row[1]}) -- "
+                f"skipping because --force was not given."
+            )
             counts["skipped"] += 1
             continue
         if args.limit and processed >= args.limit:
@@ -137,7 +148,7 @@ def main() -> int:
         print("  (needs_ocr = scanned/image-only PDFs with no text layer — see README.)")
 
     if args.export:
-        n_eq, n_team, team_path = export_csv.export(args.db, args.export)
+        n_eq, n_team, team_path = export_csv.export(args.db, args.export, file_hashes=all_hashes)
         print(f"Wrote {n_eq} equipment rows -> {args.export}")
         print(f"Wrote {n_team} team rows      -> {team_path}")
     return 0
