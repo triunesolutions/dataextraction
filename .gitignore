@@ -1,0 +1,16 @@
+# --- secrets: never commit ---
+.env
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- generated artifacts ---
+*.db
+hvac.csv
+hvac_team.csv
+out.csv
+out_team.csv
+test_*.csv
