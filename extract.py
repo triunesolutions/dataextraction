@@ -79,6 +79,20 @@ _EQUIPMENT_SYSTEM = (
 )
 
 
+def _progress(msg: str, started: Optional[float] = None) -> float:
+    """Print a phase marker, optionally with how long the previous one took.
+
+    extract_pdf spends minutes in three places that produced no output at all --
+    page text extraction, pdfplumber table detection, and a rate-limited
+    metadata call -- which made a working run indistinguishable from a hung one.
+    Returns a timestamp so the caller can close the phase off.
+    """
+    if config.SHOW_PROGRESS:
+        took = f"  ({time.time() - started:.1f}s)" if started else ""
+        print(f"      {msg}{took}", flush=True)
+    return time.time()
+
+
 @dataclass
 class ExtractionResult:
     status: str  # 'ok' | 'needs_ocr' | 'no_schedule_pages' | 'error'
@@ -490,14 +504,17 @@ def _extract_tables_for_pages(path: str, page_indices: List[int]) -> Dict[int, L
     result: Dict[int, List[str]] = {}
     try:
         with pdfplumber.open(path) as pdf:
-            for i in page_indices:
+            for n, i in enumerate(page_indices, 1):
                 if i >= len(pdf.pages):
                     continue
                 page = pdf.pages[i]
+                tp = _progress(f"table scan page {i + 1} ({n}/{len(page_indices)}) ...")
                 try:
                     table_objs = page.find_tables()
                 except Exception:
                     continue
+                finally:
+                    _progress(f"table scan page {i + 1} done", tp)
                 blocks = []
                 for t in table_objs:
                     try:
@@ -856,18 +873,24 @@ def _dedupe(rows: List[Equipment]) -> List[Equipment]:
 
 def extract_pdf(path: str) -> ExtractionResult:
     """Full extraction for one PDF. Never raises for content problems."""
+    t = _progress("reading page text ...")
     try:
         pages = read_pages(path)
     except Exception as exc:  # corrupt / unreadable PDF
         return ExtractionResult(status="error", error=f"read failed: {exc}")
+    t = _progress(f"read {len(pages)} page(s)", t)
 
     total_chars = sum(len(p) for p in pages)
     if total_chars < config.MIN_TEXT_CHARS:
         return ExtractionResult(status="needs_ocr", error="no extractable text layer")
 
     sched_idx, meta_idx = _select_pages(pages)
+    _progress(f"selected schedule pages {[i + 1 for i in sched_idx]}, "
+              f"metadata pages {[i + 1 for i in meta_idx]}")
+
     table_blocks_by_page = _extract_tables_for_pages(path, sched_idx)
 
+    t = _progress("metadata call ...")
     try:
         metadata = _extract_metadata([pages[i] for i in meta_idx])
     except Exception as exc:
@@ -875,12 +898,13 @@ def extract_pdf(path: str) -> ExtractionResult:
         meta_err = f"metadata: {exc}"
     else:
         meta_err = None
+    _progress("metadata done", t)
 
     rows: List[Equipment] = []
     errors: List[str] = [meta_err] if meta_err else []
     for n, i in enumerate(sched_idx, 1):
         if config.SHOW_PROGRESS:
-            print(f"      page {i + 1} ({n}/{len(sched_idx)}) ...", flush=True)
+            print(f"      extract page {i + 1} ({n}/{len(sched_idx)}) ...", flush=True)
         try:
             page_rows = _extract_equipment_page(pages[i], table_blocks_by_page.get(i, []))
         except Exception as exc:
