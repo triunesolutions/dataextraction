@@ -37,6 +37,15 @@ MIN_TEXT_CHARS = int(os.getenv("MIN_TEXT_CHARS", "100"))
 # How many pages (cover + page 1 + first mechanical sheet) to feed the metadata pass.
 METADATA_PAGES = int(os.getenv("METADATA_PAGES", "4"))
 
+# How many times the metadata pass may halve an oversized request before giving
+# up. Deliberately lower than the equipment pass's depth: each level doubles the
+# number of API calls, and a title block holds a handful of fields, so paying up
+# to 31 rate-limited calls to recover them is a bad trade. Measured on Kaggle,
+# the metadata pass reached 72.6s on one file while every pdfplumber table scan
+# on it finished in under 2s. Depth 2 caps it at 7 calls; anything still too
+# large returns partial metadata rather than burning the rate limit.
+METADATA_MAX_SPLIT_DEPTH = int(os.getenv("METADATA_MAX_SPLIT_DEPTH", "2"))
+
 # Markers (case-insensitive) that identify a MECHANICAL sheet — the M-series /
 # "Schedules & Notes – Mechanical" pages where HVAC schedules live.
 MECH_MARKERS = [

@@ -696,7 +696,10 @@ def _extract_metadata(page_texts: List[str], _depth: int = 0) -> ProjectMetadata
     try:
         return _metadata_once("\n\n".join(texts))
     except (GroqPayloadTooLarge, GroqInvalidJSON):
-        if _depth >= _MAX_SPLIT_DEPTH:
+        # Capped lower than the equipment pass on purpose -- see
+        # config.METADATA_MAX_SPLIT_DEPTH. Returning what we have beats
+        # spending dozens of rate-limited calls on a title block.
+        if _depth >= config.METADATA_MAX_SPLIT_DEPTH:
             raise
         if len(texts) > 1:
             mid = len(texts) // 2
