@@ -94,23 +94,17 @@ def main() -> int:
     pdfs = discover(args.roots)
     print(f"Found {len(pdfs)} PDF(s). Backend: {config.MODEL_BACKEND} / {config.active_model()}\n")
 
-    counts = {"ok": 0, "needs_ocr": 0, "error": 0, "skipped": 0}
+    counts = {"ok": 0, "needs_ocr": 0, "no_schedule_pages": 0, "error": 0, "skipped": 0}
     processed = 0
     all_hashes: set[str] = set()
+    # Files the pipeline called a success but got nothing out of. Tracked so a
+    # batch can never again report a clean run over files it silently dropped.
+    empty_ok: List[str] = []
 
     for i, path in enumerate(pdfs, 1):
         file_hash = sha256(path)
         all_hashes.add(file_hash)
         if not args.force and db.already_done(conn, file_hash):
-            # TEMPORARY DEBUG - remove once the skip-condition investigation is done.
-            row = conn.execute(
-                "SELECT status, processed_at FROM files WHERE file_hash = ?", (file_hash,)
-            ).fetchone()
-            print(
-                f"[DEBUG-SKIP] {path.name}: file_hash {file_hash[:12]}... already recorded "
-                f"in {args.db} as status='{row[0]}' (processed_at={row[1]}) -- "
-                f"skipping because --force was not given."
-            )
             counts["skipped"] += 1
             continue
         if args.limit and processed >= args.limit:
@@ -131,6 +125,8 @@ def main() -> int:
             equipment=result.equipment,
         )
         counts[result.status] = counts.get(result.status, 0) + 1
+        if result.status == "ok" and n_rows == 0:
+            empty_ok.append(path.name)
         processed += 1
         tail = f"{n_rows} rows" if result.status == "ok" else result.status.upper()
         if result.error:
@@ -142,10 +138,21 @@ def main() -> int:
     print(
         "\nDone. "
         f"ok={counts['ok']}  needs_ocr={counts['needs_ocr']}  "
+        f"no_schedule_pages={counts['no_schedule_pages']}  "
         f"error={counts['error']}  skipped={counts['skipped']}"
     )
     if counts["needs_ocr"]:
         print("  (needs_ocr = scanned/image-only PDFs with no text layer — see README.)")
+    if counts["no_schedule_pages"]:
+        print("  (no_schedule_pages = readable PDFs where no page matched SCHEDULE_KEYWORDS —")
+        print("   usually a CAD sheet whose schedule table is vector line-art. These used to")
+        print("   be reported as 'ok' with zero rows.)")
+    if empty_ok:
+        print(f"  WARNING: {len(empty_ok)} file(s) reported 'ok' but produced 0 equipment rows:")
+        for name in empty_ok[:10]:
+            print(f"    - {name}")
+        if len(empty_ok) > 10:
+            print(f"    ... and {len(empty_ok) - 10} more")
 
     if args.export:
         n_eq, n_team, team_path = export_csv.export(args.db, args.export, file_hashes=all_hashes)

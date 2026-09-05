@@ -74,6 +74,26 @@ folders ─▶ walk for *.pdf ─▶ hash (skip if already done)
 - **Scanned PDFs** (no text layer) are flagged `needs_ocr` instead of producing
   garbage rows.
 
+
+### Equipment extraction accuracy
+
+pypdf reads a CAD-drawn table in the PDF's internal paint order, not visual row
+order, which scrambles which manufacturer/model belongs to which row. Each
+schedule page is therefore also read with **pdfplumber**, which reconstructs the
+table from its actual ruled grid; where a schedule's Symbol/Tag column sits
+outside that grid (common in CAD exports) it is recovered geometrically, so a tag
+stays tied to its own row. Both views are sent to the model, with the
+grid-derived one labelled as authoritative for `Tag`, `Manufacturer` and `Model`.
+
+The metadata pass is prioritized around cover/title sheets rather than feeding a
+mechanical schedule page into the metadata prompt, which reduces
+cross-contamination between project metadata and equipment-table values.
+
+Oversized pages are split rather than dropped: on an HTTP 413 (request larger
+than the account's tokens-per-minute budget) or a persistently malformed JSON
+response, the page text and the table blocks are each divided and extracted
+separately, never cutting a row away from its own schedule title.
+
 ## Output columns
 
 **`hvac.csv`** — the main equipment list:

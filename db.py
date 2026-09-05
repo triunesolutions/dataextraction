@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS files (
     file_hash    TEXT PRIMARY KEY,
     path         TEXT NOT NULL,
     filename     TEXT NOT NULL,
-    status       TEXT NOT NULL,          -- 'ok' | 'error' | 'needs_ocr'
+    status       TEXT NOT NULL,          -- 'ok' | 'error' | 'needs_ocr' | 'no_schedule_pages'
     error        TEXT,
     processed_at TEXT NOT NULL
 );

@@ -7,6 +7,7 @@ plain-script style.
 """
 from __future__ import annotations
 
+import os
 import re
 
 import extract
@@ -278,10 +279,14 @@ def test_parenthetical_annotation_excluded_from_tag():
 #    every other schedule on page 6 of the St. Thomas the Apostle PDF.
 #    Skipped gracefully if that fixture isn't present on this machine.
 # --------------------------------------------------------------------------- #
-_REAL_PDF = (
+# Path to the page-6 fixture. Defaults to the machine it was authored on, but
+# HVAC_TEST_PDF overrides it anywhere else -- matching the HVAC_* env-var
+# convention the sibling hvac-takeoff-tool repo already uses for local paths.
+_REAL_PDF = os.environ.get(
+    "HVAC_TEST_PDF",
     r"C:\Users\91739\Desktop\hvacfiles\01-02 St Thomas The Apostle Roman Catholic "
     r"K-8 Bldg PH II Pricing\01-02 St Thomas The Apostle Roman Catholic K-8 Bldg "
-    r"PH II Pricing\Schedule\page no 6.pdf"
+    r"PH II Pricing\Schedule\page no 6.pdf",
 )
 
 
@@ -530,6 +535,74 @@ def test_persistent_invalid_json_falls_back_to_chunking():
           "instead of losing the whole page")
 
 
+# --------------------------------------------------------------------------- #
+#  Metadata pass: an oversized title block used to lose project identity
+#  entirely. A 413 there returned status 'ok' with equipment rows intact but
+#  project_name / location / engineer all null -- the single biggest source of
+#  missing project identity in earlier runs. It must now shrink and retry.
+# --------------------------------------------------------------------------- #
+def test_metadata_413_splits_instead_of_losing_the_project():
+    cover = "PROJECT: RIVERSIDE HIGH SCHOOL\nLOCATION: Phoenix, AZ\n" + ("filler line\n" * 400)
+    title = "MECHANICAL ENGINEER: ACME MEP\n" + ("more filler\n" * 400)
+
+    def fake(system, user, schema):
+        # Mimic Groq's per-request token ceiling.
+        if len(user) > 3000:
+            raise extract.GroqPayloadTooLarge("simulated 413")
+        out = {"project_name": None, "location": None, "team": []}
+        if "RIVERSIDE HIGH SCHOOL" in user:
+            out["project_name"] = "RIVERSIDE HIGH SCHOOL"
+            out["location"] = "Phoenix, AZ"
+        if "ACME MEP" in user:
+            out["team"] = [{"role": "Mechanical Engineer", "firm": "ACME MEP"}]
+        return out
+
+    orig = extract._chat_json
+    extract._chat_json = fake
+    try:
+        meta = extract._extract_metadata([cover, title])
+    finally:
+        extract._chat_json = orig
+
+    _assert(meta.project_name == "RIVERSIDE HIGH SCHOOL",
+            f"project_name lost to the 413: {meta.project_name!r}")
+    _assert(meta.location == "Phoenix, AZ", f"location lost to the 413: {meta.location!r}")
+    firms = [m.firm for m in meta.team]
+    _assert("ACME MEP" in firms, f"engineer firm lost to the 413: {firms}")
+    print("PASS: metadata 413 splits across pages and merges -- project, location and "
+          "engineer all survive")
+
+
+def test_metadata_merge_prefers_first_value_and_dedupes_team():
+    from schemas import ProjectMetadata, TeamMember
+    base = ProjectMetadata(project_name="FIRST", team=[TeamMember(role="Architect", firm="AOR")])
+    extra = ProjectMetadata(project_name="SECOND", location="Mesa, AZ",
+                            team=[TeamMember(role="architect", firm="aor"),
+                                  TeamMember(role="Civil", firm="CIV")])
+    merged = extract._merge_metadata(base, extra)
+    _assert(merged.project_name == "FIRST", "an already-known value must not be overwritten")
+    _assert(merged.location == "Mesa, AZ", "a missing value must be filled from the other half")
+    _assert(len(merged.team) == 2, f"team should dedupe case-insensitively, got {merged.team}")
+    print("PASS: metadata merge keeps the first non-empty value and dedupes team on (role, firm)")
+
+
+def test_no_schedule_pages_is_not_reported_as_ok():
+    # A readable PDF where nothing matches SCHEDULE_KEYWORDS (a CAD sheet whose
+    # table is vector line-art) must not look like a clean success.
+    orig_read, orig_chat = extract.read_pages, extract._chat_json
+    extract.read_pages = lambda path: ["general notes and details, nothing tabular here. " * 10]
+    extract._chat_json = lambda system, user, schema: {"team": []}
+    try:
+        result = extract.extract_pdf("irrelevant.pdf")
+    finally:
+        extract.read_pages, extract._chat_json = orig_read, orig_chat
+
+    _assert(result.status == "no_schedule_pages",
+            f"expected 'no_schedule_pages', got {result.status!r}")
+    _assert(not result.equipment, "no rows should be claimed")
+    print("PASS: a file with no schedule pages reports 'no_schedule_pages', not a silent 'ok'")
+
+
 TESTS = [
     test_combined_stacked_cells_split_correctly,
     test_combined_split_does_not_shift_adjacent_columns,
@@ -547,6 +620,9 @@ TESTS = [
     test_table_text_survives_split_in_every_chunk,
     test_multiple_table_blocks_are_partitioned_not_all_duplicated,
     test_persistent_invalid_json_falls_back_to_chunking,
+    test_metadata_413_splits_instead_of_losing_the_project,
+    test_metadata_merge_prefers_first_value_and_dedupes_team,
+    test_no_schedule_pages_is_not_reported_as_ok,
 ]
 
 

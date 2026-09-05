@@ -31,7 +31,9 @@ _METADATA_SYSTEM = (
     "city/state/zip, phone, contact person, email when shown. The 'firm' is the company "
     "name only — do not append stray words like 'KEYPLAN' or 'SHEET INDEX'.\n"
     "\n"
-    "Only use information present in the text. Use null for anything not stated. Do not guess."
+    "Only use information present in the text. Use null for anything not stated. Do not guess. "
+    "Ignore equipment schedule rows when determining project metadata; schedule titles, equipment "
+    "tags, model numbers, and capacities are not project metadata."
 )
 
 _EQUIPMENT_SYSTEM = (
@@ -79,7 +81,7 @@ _EQUIPMENT_SYSTEM = (
 
 @dataclass
 class ExtractionResult:
-    status: str  # 'ok' | 'needs_ocr' | 'error'
+    status: str  # 'ok' | 'needs_ocr' | 'no_schedule_pages' | 'error'
     metadata: Optional[ProjectMetadata] = None
     equipment: Optional[List[Equipment]] = None
     error: Optional[str] = None
@@ -542,8 +544,13 @@ def _select_pages(pages: List[str]) -> tuple[List[int], List[int]]:
         sched_targets = sched
 
     cover = [i for i, t in enumerate(pages) if _is_cover_page(t)]
+
+    # Metadata should come primarily from the cover/title sheets. The previous
+    # logic could feed a mechanical schedule page into the metadata pass before
+    # some title pages, which increased the chance of mixing drawing/schedule
+    # values into project metadata.
     ordered: List[int] = []
-    for i in cover + ([0] if pages else []) + (mech[:1] if mech else []):
+    for i in cover + list(range(min(len(pages), config.METADATA_PAGES))) + (mech[:1] if not cover else []):
         if i not in ordered:
             ordered.append(i)
     meta = ordered[: config.METADATA_PAGES]
@@ -551,10 +558,73 @@ def _select_pages(pages: List[str]) -> tuple[List[int], List[int]]:
     return sched_targets, meta
 
 
-def _extract_metadata(head: str) -> ProjectMetadata:
-    head = head.strip()
-    if not head:
+def _merge_metadata(base: ProjectMetadata, extra: ProjectMetadata) -> ProjectMetadata:
+    """Fill in whatever `base` is still missing from `extra`.
+
+    Used when the metadata pass had to be split across several smaller
+    requests: the project name may come back from the cover sheet and the
+    revision from the title block, and neither attempt sees the whole thing.
+    First non-empty wins for scalars; team members are unioned, deduped on
+    (role, firm) so the same firm read twice doesn't appear twice.
+    """
+    for field in ProjectMetadata.model_fields:
+        if field == "team":
+            continue
+        if not getattr(base, field, None) and getattr(extra, field, None):
+            setattr(base, field, getattr(extra, field))
+    seen = {((m.role or "").upper(), (m.firm or "").upper()) for m in base.team}
+    for m in extra.team:
+        key = ((m.role or "").upper(), (m.firm or "").upper())
+        if key not in seen:
+            seen.add(key)
+            base.team.append(m)
+    return base
+
+
+def _extract_metadata(page_texts: List[str], _depth: int = 0) -> ProjectMetadata:
+    """Structure the cover/title pages into ProjectMetadata.
+
+    Takes the pages separately rather than pre-joined so an oversized request
+    has something to shed. Without this, a single 413 on a large title block
+    loses project_name / location / engineer for the whole file -- silently,
+    since the equipment rows still extract fine and the file is still recorded
+    'ok'. That was the single biggest source of missing project identity in
+    earlier runs.
+
+    Shrinks in the order that costs the least information: first fewer pages
+    (each extracted separately, then merged), and only then a halved page,
+    split on a line boundary so address and phone lines stay intact.
+    """
+    texts = [t.strip() for t in page_texts if t and t.strip()]
+    if not texts:
         return ProjectMetadata()
+    try:
+        return _metadata_once("\n\n".join(texts))
+    except (GroqPayloadTooLarge, GroqInvalidJSON):
+        if _depth >= _MAX_SPLIT_DEPTH:
+            raise
+        if len(texts) > 1:
+            mid = len(texts) // 2
+            halves = [texts[:mid], texts[mid:]]
+        else:
+            lines = texts[0].splitlines(keepends=True)
+            if len(lines) <= 1:
+                raise  # nothing left to divide
+            mid = len(lines) // 2
+            halves = [["".join(lines[:mid])], ["".join(lines[mid:])]]
+        merged = ProjectMetadata()
+        failures = 0
+        for half in halves:
+            try:
+                merged = _merge_metadata(merged, _extract_metadata(half, _depth + 1))
+            except (GroqPayloadTooLarge, GroqInvalidJSON):
+                failures += 1
+        if failures == len(halves):
+            raise  # both sides still too large -- report it rather than fake success
+        return merged
+
+
+def _metadata_once(head: str) -> ProjectMetadata:
     prompt = (
         "Extract the project metadata from this mechanical drawing-set title block "
         "/ notes. The 'engineer' should be the mechanical / MEP engineer of record:\n\n"
@@ -562,6 +632,27 @@ def _extract_metadata(head: str) -> ProjectMetadata:
     )
     data = _chat_json(_METADATA_SYSTEM, prompt, ProjectMetadata.model_json_schema())
     return ProjectMetadata.model_validate(data)
+
+
+def _validate_rows(data: dict) -> List[Equipment]:
+    """Validate the model's rows one at a time.
+
+    `schedule` and `tag` are required on Equipment, so validating the whole
+    EquipmentPage payload at once means a single malformed row raises and
+    discards every other row on the page -- and ValidationError isn't one of
+    the exceptions the split fallback below catches, so those rows are simply
+    lost. Per-row validation keeps the strict schema the model is asked for
+    while salvaging every row that did come back well-formed.
+    """
+    rows: List[Equipment] = []
+    for raw in (data or {}).get("equipment", []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            rows.append(Equipment.model_validate(raw))
+        except Exception:
+            continue
+    return rows
 
 
 # A page that's still too large after this many halvings is given up on (16
@@ -629,7 +720,7 @@ def _extract_equipment_page(
     prompt = "Extract every equipment schedule row from this page:\n\n" + prompt_text
     try:
         data = _chat_json(_EQUIPMENT_SYSTEM, prompt, EquipmentPage.model_json_schema())
-        return EquipmentPage.model_validate(data).equipment
+        return _validate_rows(data)
     except (GroqPayloadTooLarge, GroqInvalidJSON):
         # Either the page alone is bigger than Groq's per-minute token budget
         # (retrying the same request would just fail again), or the model's
@@ -699,23 +790,8 @@ def extract_pdf(path: str) -> ExtractionResult:
     sched_idx, meta_idx = _select_pages(pages)
     table_blocks_by_page = _extract_tables_for_pages(path, sched_idx)
 
-    # TEMPORARY DEBUG - remove once the 0-equipment-rows investigation is done.
-    print(f"[DEBUG-EXTRACT] {path}: {len(pages)} page(s) total; "
-          f"sched_idx={sched_idx} meta_idx={meta_idx}")
-    for i in sched_idx:
-        blocks = table_blocks_by_page.get(i, [])
-        print(f"[DEBUG-EXTRACT]   page {i}: {len(blocks)} pdfplumber table block(s) detected")
-        for bi, b in enumerate(blocks):
-            has_mfr_model = "Manufacturer:" in b
-            has_tag = "Tag:" in b
-            preview = b[:150].replace("\n", " / ")
-            print(f"[DEBUG-EXTRACT]     block {bi}: has_Manufacturer_label={has_mfr_model} "
-                  f"has_Tag_label={has_tag}  preview={preview!r}")
-        if not blocks:
-            print(f"[DEBUG-EXTRACT]     (no ruled tables found by pdfplumber on this page)")
-
     try:
-        metadata = _extract_metadata("\n\n".join(pages[i] for i in meta_idx))
+        metadata = _extract_metadata([pages[i] for i in meta_idx])
     except Exception as exc:
         metadata = ProjectMetadata()
         meta_err = f"metadata: {exc}"
@@ -726,16 +802,22 @@ def extract_pdf(path: str) -> ExtractionResult:
     errors: List[str] = [meta_err] if meta_err else []
     for i in sched_idx:
         try:
-            page_rows = _extract_equipment_page(pages[i], table_blocks_by_page.get(i, []))
-            # TEMPORARY DEBUG - remove once the 0-equipment-rows investigation is done.
-            print(f"[DEBUG-EXTRACT]   page {i}: LLM returned {len(page_rows)} equipment row(s)")
-            if not page_rows:
-                preview = pages[i][:300].replace("\n", " / ")
-                print(f"[DEBUG-EXTRACT]     page {i} had 0 rows -- plain text sent was: {preview!r}")
-            rows.extend(page_rows)
+            rows.extend(_extract_equipment_page(pages[i], table_blocks_by_page.get(i, [])))
         except Exception as exc:
-            print(f"[DEBUG-EXTRACT]   page {i}: EXCEPTION during extraction: {exc}")
             errors.append(f"page {i + 1}: {exc}")
+
+    # A file that yielded nothing must never look like a clean success. Page
+    # selection finding no schedule pages at all (a CAD sheet whose table is
+    # vector line-art, or one that uses none of SCHEDULE_KEYWORDS) previously
+    # returned 'ok' with an empty list, indistinguishable in the output from a
+    # file that genuinely has no equipment on it.
+    if not sched_idx:
+        return ExtractionResult(
+            status="no_schedule_pages",
+            metadata=metadata,
+            equipment=[],
+            error="; ".join(errors + ["no page matched SCHEDULE_KEYWORDS"]),
+        )
 
     return ExtractionResult(
         status="ok",
