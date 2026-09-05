@@ -50,6 +50,19 @@ MECH_MARKERS = [
 # mechanical sheet is detected.
 RESTRICT_TO_MECHANICAL = os.getenv("RESTRICT_TO_MECHANICAL", "true").lower() != "false"
 
+# Prefer pages carrying an actual schedule TITLE line over any page merely
+# containing a SCHEDULE_KEYWORDS substring. Measured over 8 drawing sets, the
+# substring rule qualified 51 of 103 pages against 13 with a real title -- most
+# of the difference being title blocks, sheet indexes and "SEE SCHEDULE" notes,
+# each costing a pdfplumber pass and an API call for nothing. Falls back to the
+# wider set on any file where no title matches, so no file loses coverage.
+PREFER_SCHEDULE_TITLES = os.getenv("PREFER_SCHEDULE_TITLES", "true").lower() != "false"
+
+# Print a line per schedule page as it is processed. A single file can take
+# minutes (pdfplumber table detection plus a rate-limited API call per page),
+# and without this a long run is indistinguishable from a hung one.
+SHOW_PROGRESS = os.getenv("SHOW_PROGRESS", "true").lower() != "false"
+
 # The full project team directory lives on the COVER / TITLE sheet. These markers
 # (case-insensitive) find that sheet so the metadata pass can read the whole team.
 COVER_MARKERS = [

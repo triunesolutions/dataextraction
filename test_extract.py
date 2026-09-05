@@ -642,6 +642,45 @@ def test_prefix_duplicates_collapse_but_distinct_roles_survive():
           "acronyms are left alone")
 
 
+def test_schedule_title_pages_preferred_over_keyword_only_pages():
+    # p0: title block mentioning the word -> keyword match, no real table.
+    # p1: sheet index row -> keyword match, no real table.
+    # p2: an actual schedule title.
+    pages = [
+        "MECHANICAL PLAN\nSEE SCHEDULE ON SHEET M601\nGENERAL NOTES",
+        "SHEET INDEX\nM601 MECHANICAL SCHEDULES AND DETAILS\nM101 HVAC PLAN",
+        "FAN COIL UNIT SCHEDULE\nMARK MANUFACTURER MODEL CFM\nFC-1 DAIKIN FXAQ07 260",
+    ]
+    sched, _meta = extract._select_pages(pages)
+    _assert(sched == [2], f"only the page with a real schedule title should be sent, got {sched}")
+    print("PASS: schedule-title pages preferred; title blocks and sheet indexes dropped")
+
+
+def test_falls_back_to_keyword_pages_when_no_title_matches():
+    # No line ends in SCHEDULE, but the pages plainly carry equipment data.
+    # Dropping these would silently lose the file -- MedVet Phoenix in the real
+    # corpus behaves exactly this way and yields the most rows of any test file.
+    pages = [
+        "EQUIPMENT SCHEDULE - ROOFTOP UNITS (SEE NOTES)\nMARK MANUFACTURER MODEL",
+        "RTU-1 CARRIER 48TC MODEL NO. 48TCED07",
+    ]
+    sched, _meta = extract._select_pages(pages)
+    _assert(sched == [0, 1], f"must fall back to the wider keyword set, got {sched}")
+    print("PASS: no title match anywhere -> falls back to keyword pages, file not dropped")
+
+
+def test_see_schedule_reference_is_not_a_title():
+    _assert(not extract._is_schedule_title_page("SEE SCHEDULE ON SHEET M601"),
+            "a cross-reference must not count as a schedule title")
+    _assert(not extract._is_schedule_title_page("M601 MECHANICAL SCHEDULES AND DETAILS"),
+            "a sheet-index row must not count as a schedule title")
+    _assert(extract._is_schedule_title_page("GRILLES, REGISTERS AND DIFFUSERS SCHEDULE"),
+            "a real schedule title must be recognised")
+    _assert(extract._is_schedule_title_page("intro\nFAN SCHEDULE\nMARK CFM"),
+            "a title on its own line mid-page must be recognised")
+    print("PASS: schedule-title detection separates real titles from references and index rows")
+
+
 TESTS = [
     test_combined_stacked_cells_split_correctly,
     test_combined_split_does_not_shift_adjacent_columns,
@@ -663,6 +702,9 @@ TESTS = [
     test_metadata_merge_prefers_first_value_and_dedupes_team,
     test_prefix_duplicates_collapse_but_distinct_roles_survive,
     test_no_schedule_pages_is_not_reported_as_ok,
+    test_schedule_title_pages_preferred_over_keyword_only_pages,
+    test_falls_back_to_keyword_pages_when_no_title_matches,
+    test_see_schedule_reference_is_not_a_title,
 ]
 
 

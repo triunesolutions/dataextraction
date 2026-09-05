@@ -521,6 +521,16 @@ def _is_schedule_page(text: str) -> bool:
     return any(kw in upper for kw in config.SCHEDULE_KEYWORDS)
 
 
+# A line that *is* a schedule title ("FAN COIL UNIT SCHEDULE"), as opposed to
+# one merely mentioning the word ("SEE SCHEDULE ON SHEET M601", a sheet-index
+# row, a general note). Anchored to end-of-line so only the former matches.
+_SCHEDULE_TITLE_RE = re.compile(r"^[A-Z0-9][A-Z0-9 ,&/'\-\.]{2,60}SCHEDULE\s*$", re.M)
+
+
+def _is_schedule_title_page(text: str) -> bool:
+    return bool(_SCHEDULE_TITLE_RE.search(text.upper()))
+
+
 def _is_mechanical_page(text: str) -> bool:
     upper = text.upper()
     return any(m in upper for m in config.MECH_MARKERS)
@@ -536,12 +546,38 @@ def _select_pages(pages: List[str]) -> tuple[List[int], List[int]]:
     sched = [i for i, t in enumerate(pages) if _is_schedule_page(t)]
     mech = [i for i, t in enumerate(pages) if _is_mechanical_page(t)]
 
-    if config.RESTRICT_TO_MECHANICAL and mech:
-        mech_set = set(mech)
-        targeted = [i for i in sched if i in mech_set]
-        sched_targets = targeted or sched  # never silently drop everything
+    mech_set = set(mech)
+
+    def _narrow_to_mechanical(candidates: List[int]) -> List[int]:
+        """Drop plumbing/electrical schedules, but never drop everything."""
+        if not (config.RESTRICT_TO_MECHANICAL and mech):
+            return candidates
+        return [i for i in candidates if i in mech_set] or candidates
+
+    # SCHEDULE_KEYWORDS match a bare substring, so a title block, a sheet index
+    # or a "SEE SCHEDULE" note qualifies a page carrying no table at all.
+    # Measured over 8 real drawing sets: 51 of 103 pages qualified, against 13
+    # holding an actual schedule title -- roughly 4x the pdfplumber passes and
+    # 4x the API calls needed, on exactly the rate limit that is the bottleneck
+    # at corpus scale.
+    #
+    # A schedule title is the strongest signal available, so it is applied to
+    # the whole document FIRST and the mechanical narrowing applied to what it
+    # finds. Doing it the other way round lets the mechanical filter discard a
+    # real schedule page whose text simply never says "MECHANICAL" -- the word
+    # usually lives in the title block, so this held only by luck.
+    titled: List[int] = []
+    if config.PREFER_SCHEDULE_TITLES:
+        titled = [i for i, t in enumerate(pages) if _is_schedule_title_page(t)]
+
+    if titled:
+        sched_targets = _narrow_to_mechanical(titled)
     else:
-        sched_targets = sched
+        # No page states a schedule title in a form we recognise. One of the 8
+        # sets is like this, and it also yields the most rows of any of them --
+        # so fall back to the wider keyword rule at its old cost rather than
+        # dropping the file silently.
+        sched_targets = _narrow_to_mechanical(sched)
 
     cover = [i for i, t in enumerate(pages) if _is_cover_page(t)]
 
@@ -842,11 +878,15 @@ def extract_pdf(path: str) -> ExtractionResult:
 
     rows: List[Equipment] = []
     errors: List[str] = [meta_err] if meta_err else []
-    for i in sched_idx:
+    for n, i in enumerate(sched_idx, 1):
+        if config.SHOW_PROGRESS:
+            print(f"      page {i + 1} ({n}/{len(sched_idx)}) ...", flush=True)
         try:
-            rows.extend(_extract_equipment_page(pages[i], table_blocks_by_page.get(i, [])))
+            page_rows = _extract_equipment_page(pages[i], table_blocks_by_page.get(i, []))
         except Exception as exc:
             errors.append(f"page {i + 1}: {exc}")
+        else:
+            rows.extend(page_rows)
 
     # A file that yielded nothing must never look like a clean success. Page
     # selection finding no schedule pages at all (a CAD sheet whose table is
