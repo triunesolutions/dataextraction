@@ -564,21 +564,63 @@ def _merge_metadata(base: ProjectMetadata, extra: ProjectMetadata) -> ProjectMet
     Used when the metadata pass had to be split across several smaller
     requests: the project name may come back from the cover sheet and the
     revision from the title block, and neither attempt sees the whole thing.
-    First non-empty wins for scalars; team members are unioned, deduped on
-    (role, firm) so the same firm read twice doesn't appear twice.
+    First non-empty wins for scalars. Team members are unioned and collapsed
+    where one entry's role and firm are each either equal to, or a prefix of,
+    the other's -- 'JGGM' / 'JGGM Engineering', or 'Architect' /
+    'Architect of Record' for the same firm. Halves of a split see the same
+    firm written at different lengths, so these near-duplicates are an artifact
+    this function creates and should therefore also remove. The longer, more
+    specific spelling is the one kept.
+
+    Deliberately no fuzzy or acronym matching: 'GSA' and 'General Services
+    Administration' stay as two rows. Collapsing those is a normalization
+    judgement about the data itself, not cleanup of a split artifact.
     """
     for field in ProjectMetadata.model_fields:
         if field == "team":
             continue
         if not getattr(base, field, None) and getattr(extra, field, None):
             setattr(base, field, getattr(extra, field))
-    seen = {((m.role or "").upper(), (m.firm or "").upper()) for m in base.team}
+
     for m in extra.team:
-        key = ((m.role or "").upper(), (m.firm or "").upper())
-        if key not in seen:
-            seen.add(key)
+        for existing in base.team:
+            if (_prefix_compatible(existing.role, m.role)
+                    and _prefix_compatible(existing.firm, m.firm)):
+                _absorb_member(existing, m)
+                break
+        else:
             base.team.append(m)
     return base
+
+
+def _prefix_compatible(a: Optional[str], b: Optional[str]) -> bool:
+    """True when a and b are the same value written at different lengths.
+
+    Compared case-insensitively and ignoring punctuation, so 'SHIVE-HATTERY,
+    INC.' and 'Shive Hattery Inc' line up. A blank only matches another blank
+    -- without that guard every empty firm would prefix-match every real one
+    and collapse unrelated people into a single row.
+    """
+    na, nb = _norm_name(a), _norm_name(b)
+    if not na or not nb:
+        return na == nb
+    return na.startswith(nb) or nb.startswith(na)
+
+
+def _norm_name(s: Optional[str]) -> str:
+    return re.sub(r"[^A-Z0-9 ]", "", (s or "").upper()).strip()
+
+
+def _absorb_member(keep, other) -> None:
+    """Merge `other` into `keep`, preferring the longer role/firm spelling and
+    filling any field `keep` left blank."""
+    for field in ("role", "firm"):
+        a, b = getattr(keep, field) or "", getattr(other, field) or ""
+        if len(_norm_name(b)) > len(_norm_name(a)):
+            setattr(keep, field, b)
+    for field in ("address", "city_state_zip", "phone", "contact", "email"):
+        if not getattr(keep, field, None) and getattr(other, field, None):
+            setattr(keep, field, getattr(other, field))
 
 
 def _extract_metadata(page_texts: List[str], _depth: int = 0) -> ProjectMetadata:

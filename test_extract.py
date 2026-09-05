@@ -603,6 +603,45 @@ def test_no_schedule_pages_is_not_reported_as_ok():
     print("PASS: a file with no schedule pages reports 'no_schedule_pages', not a silent 'ok'")
 
 
+def test_prefix_duplicates_collapse_but_distinct_roles_survive():
+    from schemas import ProjectMetadata, TeamMember
+    base = ProjectMetadata(team=[
+        TeamMember(role="Mechanical Engineer", firm="JGGM"),
+        TeamMember(role="Architect", firm="MICHAEL A. HALL ARCHITECT, LLC"),
+        TeamMember(role="Electrical Engineer", firm="DLR GROUP"),
+    ])
+    extra = ProjectMetadata(team=[
+        # same firm written longer -> collapses, longer spelling wins
+        TeamMember(role="Mechanical Engineer", firm="JGGM Engineering", phone="602-555-0100"),
+        # role written more specifically, same firm -> collapses
+        TeamMember(role="Architect of Record", firm="Michael A. Hall Architect LLC"),
+        # genuinely different role at the same firm -> must NOT collapse
+        TeamMember(role="Structural Engineer", firm="DLR GROUP"),
+        # acronym, not a prefix -> deliberately left alone
+        TeamMember(role="Owner", firm="GSA"),
+        TeamMember(role="Owner", firm="GENERAL SERVICES ADMINISTRATION"),
+    ])
+    merged = extract._merge_metadata(base, extra)
+    got = {(m.role, m.firm) for m in merged.team}
+
+    _assert(("Mechanical Engineer", "JGGM Engineering") in got,
+            f"longer firm spelling should win: {got}")
+    _assert(not any(f == "JGGM" for _, f in got), f"short duplicate should be gone: {got}")
+    _assert(any(r == "Architect of Record" for r, _ in got),
+            f"more specific role should win: {got}")
+    _assert(not any(r == "Architect" for r, _ in got), f"'Architect' should have collapsed: {got}")
+    _assert(("Electrical Engineer", "DLR GROUP") in got and
+            ("Structural Engineer", "DLR GROUP") in got,
+            f"distinct roles at one firm must both survive: {got}")
+    _assert(sum(1 for r, _ in got if r == "Owner") == 2,
+            f"acronym vs full name is normalization, not a split artifact: {got}")
+
+    mech = next(m for m in merged.team if m.role == "Mechanical Engineer")
+    _assert(mech.phone == "602-555-0100", "fields from the absorbed entry should be kept")
+    print("PASS: prefix duplicates collapse to the longer spelling; distinct roles and "
+          "acronyms are left alone")
+
+
 TESTS = [
     test_combined_stacked_cells_split_correctly,
     test_combined_split_does_not_shift_adjacent_columns,
@@ -622,6 +661,7 @@ TESTS = [
     test_persistent_invalid_json_falls_back_to_chunking,
     test_metadata_413_splits_instead_of_losing_the_project,
     test_metadata_merge_prefers_first_value_and_dedupes_team,
+    test_prefix_duplicates_collapse_but_distinct_roles_survive,
     test_no_schedule_pages_is_not_reported_as_ok,
 ]
 
