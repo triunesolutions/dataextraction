@@ -30,10 +30,50 @@ import sys
 REPO_URL = "https://github.com/triunesolutions/dataextraction"
 BRANCH = os.environ.get("KAGGLE_RUN_BRANCH", "merge/main-pranali-sahil")
 LIMIT = int(os.environ.get("KAGGLE_RUN_LIMIT", "0"))  # 0 = every file
-WORK = "/kaggle/working"
+
+
+def _platform():
+    """'kaggle' or 'colab'. Both are supported because the two differ only in
+    where files live and how secrets are read -- nothing about the extraction."""
+    if os.path.isdir("/kaggle/input") or os.path.isdir("/kaggle/working"):
+        return "kaggle"
+    try:
+        import google.colab  # noqa: F401
+        return "colab"
+    except ImportError:
+        return "kaggle"
+
+
+PLATFORM = _platform()
+
+if PLATFORM == "colab":
+    # Prefer Drive when it is mounted. This is the substantive reason to use
+    # Colab: a Kaggle session discards /kaggle/working unless Save Version is
+    # pressed, and two runs' results were lost that way. Anything written under
+    # Drive survives the session ending, and the database is the valuable part
+    # -- it is what lets a later run skip finished files by content hash.
+    _drive = "/content/drive/MyDrive"
+    WORK = os.path.join(_drive, "hvac_extract") if os.path.isdir(_drive) else "/content"
+    os.makedirs(WORK, exist_ok=True)
+    # Corpus: set KAGGLE_RUN_CORPUS, else look in Drive, else /content.
+    CORPUS_ROOTS = [os.environ.get("KAGGLE_RUN_CORPUS", ""),
+                    os.path.join(_drive, "hvac_pdfs"), "/content"]
+else:
+    WORK = "/kaggle/working"
+    CORPUS_ROOTS = sorted(glob.glob("/kaggle/input/*"))
+
 REPO_DIR = os.path.join(WORK, "dataextraction")
 DB = os.path.join(WORK, "hvac.db")
 CSV = os.path.join(WORK, "hvac.csv")
+
+
+def _get_secret(name):
+    """Read an API key from whichever secret store this platform provides."""
+    if PLATFORM == "colab":
+        from google.colab import userdata
+        return userdata.get(name)
+    from kaggle_secrets import UserSecretsClient
+    return UserSecretsClient().get_secret(name)
 
 
 def _step(msg):
@@ -41,6 +81,9 @@ def _step(msg):
 
 
 # --------------------------------------------------------------------------- #
+_step("platform")
+print(PLATFORM, "| work dir:", WORK)
+
 _step("code")
 os.chdir(WORK)                       # never stand inside what we delete
 shutil.rmtree(REPO_DIR, ignore_errors=True)
@@ -60,9 +103,7 @@ import pdfplumber
 print("pdfplumber", pdfplumber.__version__)
 
 _step("credentials")
-from kaggle_secrets import UserSecretsClient
-
-key = UserSecretsClient().get_secret("GROQ_API_KEY").strip()
+key = (_get_secret("GROQ_API_KEY") or "").strip()
 assert key.startswith("gsk_"), "GROQ_API_KEY secret missing or malformed"
 os.environ["MODEL_BACKEND"] = "groq"
 os.environ["GROQ_API_KEY"] = key
@@ -73,7 +114,8 @@ if os.path.exists(stale):
 print("set in environment, length %d (not printed)" % len(key))
 
 _step("database")
-prior = glob.glob("/kaggle/input/*/hvac.db") + glob.glob("/kaggle/input/*/*/hvac.db")
+prior = (glob.glob("/kaggle/input/*/hvac.db") + glob.glob("/kaggle/input/*/*/hvac.db")
+         if PLATFORM == "kaggle" else [])
 if prior and not os.path.exists(DB):
     shutil.copy(prior[0], DB)
     print("restored from", prior[0])
@@ -96,11 +138,13 @@ else:
 
 _step("corpus")
 CORPUS = None
-for root in sorted(glob.glob("/kaggle/input/*")):
-    if glob.glob(os.path.join(root, "**", "*.pdf"), recursive=True):
+for root in CORPUS_ROOTS:
+    if root and os.path.isdir(root) and glob.glob(
+            os.path.join(root, "**", "*.pdf"), recursive=True):
         CORPUS = root
         break
-assert CORPUS, "no attached dataset contains PDFs"
+assert CORPUS, ("no PDFs found in %s -- attach the dataset (Kaggle) or set "
+                "KAGGLE_RUN_CORPUS to the folder holding them (Colab)" % CORPUS_ROOTS)
 print(CORPUS, "-", len(glob.glob(os.path.join(CORPUS, "**", "*.pdf"), recursive=True)), "PDFs")
 
 _step("run")
@@ -146,4 +190,7 @@ if os.path.exists(DB):
 for f in sorted(glob.glob(os.path.join(WORK, "*.csv")) + [DB]):
     if os.path.exists(f):
         print("   %8.2f MB  %s" % (os.path.getsize(f) / 1e6, f))
-print("\nSave Version to keep these, then attach the output next session.")
+if PLATFORM == "kaggle":
+    print("\nSave Version to keep these, then attach the output next session.")
+else:
+    print("\nWritten under %s -- survives the session ending." % WORK)
