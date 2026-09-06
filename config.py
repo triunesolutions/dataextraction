@@ -46,6 +46,15 @@ METADATA_PAGES = int(os.getenv("METADATA_PAGES", "4"))
 # large returns partial metadata rather than burning the rate limit.
 METADATA_MAX_SPLIT_DEPTH = int(os.getenv("METADATA_MAX_SPLIT_DEPTH", "2"))
 
+# Longest single rate-limit sleep to accept. Groq answers 429 with a Retry-After
+# that, once the tokens-per-minute budget is exhausted, can be many minutes; the
+# old code slept for whatever it said, silently, up to five times per call. A
+# run doing that is indistinguishable from a hung one -- it was reported as the
+# metadata call "getting stuck". Waits under this are taken (and logged); a
+# longer one means the tier is exhausted rather than momentarily busy, which is
+# worth surfacing immediately instead of sleeping through.
+GROQ_MAX_BACKOFF = float(os.getenv("GROQ_MAX_BACKOFF", "90"))
+
 # Markers (case-insensitive) that identify a MECHANICAL sheet — the M-series /
 # "Schedules & Notes – Mechanical" pages where HVAC schedules live.
 MECH_MARKERS = [

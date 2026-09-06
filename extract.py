@@ -139,6 +139,16 @@ class GroqPayloadTooLarge(RuntimeError):
     """
 
 
+class GroqRateLimited(RuntimeError):
+    """Groq's Retry-After exceeded config.GROQ_MAX_BACKOFF (HTTP 429).
+
+    Distinct from a brief 429 the request loop absorbs: this means the account's
+    budget is spent, not that the endpoint is momentarily busy. Sleeping it off
+    can take many minutes per call with nothing to show, so it is raised and
+    aborts the batch -- every later file would hit the same wall.
+    """
+
+
 class GroqInvalidJSON(RuntimeError):
     """Groq rejected its own generation as malformed JSON (HTTP 400,
     code 'json_validate_failed') -- typically a truncated or malformed
@@ -209,7 +219,18 @@ def _groq_chat_json(system: str, user: str, schema: dict) -> dict:
                 return resp["choices"][0]["message"]["content"]
             except urllib.error.HTTPError as e:
                 if e.code == 429 and attempt < 4:  # rate limited -> back off and retry
-                    wait = float(e.headers.get("retry-after", 4)) + 1
+                    try:
+                        wait = float(e.headers.get("retry-after", 4)) + 1
+                    except (TypeError, ValueError):
+                        wait = 5.0
+                    if wait > config.GROQ_MAX_BACKOFF:
+                        raise GroqRateLimited(
+                            f"Groq asked for a {wait:.0f}s wait (429), over the "
+                            f"{config.GROQ_MAX_BACKOFF:.0f}s cap. The account's rate "
+                            f"limit is exhausted rather than busy."
+                        )
+                    _progress(f"rate limited, waiting {wait:.0f}s "
+                              f"(attempt {attempt + 1}/5)")
                     time.sleep(wait)
                     continue
                 raw_detail = e.read().decode(errors="replace")
@@ -896,6 +917,8 @@ def extract_pdf(path: str) -> ExtractionResult:
     t = _progress("metadata call ...")
     try:
         metadata = _extract_metadata([pages[i] for i in meta_idx])
+    except GroqRateLimited:
+        raise          # fatal for the batch, not just this file
     except Exception as exc:
         metadata = ProjectMetadata()
         meta_err = f"metadata: {exc}"
@@ -910,6 +933,8 @@ def extract_pdf(path: str) -> ExtractionResult:
             print(f"      extract page {i + 1} ({n}/{len(sched_idx)}) ...", flush=True)
         try:
             page_rows = _extract_equipment_page(pages[i], table_blocks_by_page.get(i, []))
+        except GroqRateLimited:
+            raise      # fatal for the batch, not just this page
         except Exception as exc:
             errors.append(f"page {i + 1}: {exc}")
         else:

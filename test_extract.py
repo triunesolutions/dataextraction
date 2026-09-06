@@ -681,6 +681,38 @@ def test_see_schedule_reference_is_not_a_title():
     print("PASS: schedule-title detection separates real titles from references and index rows")
 
 
+def test_long_retry_after_raises_instead_of_sleeping():
+    # Groq answering "wait 600s" used to become a silent 600s sleep, up to five
+    # times per call. That is what looked like the metadata call hanging.
+    import urllib.error, io as _io, config as _cfg
+
+    calls = {"sleeps": []}
+    real_sleep, real_open = extract.time.sleep, extract.urllib.request.urlopen
+    extract.time.sleep = lambda s: calls["sleeps"].append(s)
+
+    def fake_open(req, timeout=None):
+        raise urllib.error.HTTPError(
+            'http://x', 429, 'Too Many Requests',
+            {'retry-after': '600'}, _io.BytesIO(b'{}'))
+
+    extract.urllib.request.urlopen = fake_open
+    old_key, old_cap = _cfg.GROQ_API_KEY, _cfg.GROQ_MAX_BACKOFF
+    _cfg.GROQ_API_KEY, _cfg.GROQ_MAX_BACKOFF = 'gsk_test', 90.0
+    try:
+        raised = None
+        try:
+            extract._groq_chat_json('sys', 'user', {})
+        except extract.GroqRateLimited as e:
+            raised = e
+    finally:
+        extract.time.sleep, extract.urllib.request.urlopen = real_sleep, real_open
+        _cfg.GROQ_API_KEY, _cfg.GROQ_MAX_BACKOFF = old_key, old_cap
+
+    _assert(raised is not None, "a 600s Retry-After must raise, not sleep")
+    _assert(not calls["sleeps"], f"nothing should have been slept, got {calls['sleeps']}")
+    print("PASS: an over-cap Retry-After raises GroqRateLimited instead of sleeping silently")
+
+
 TESTS = [
     test_combined_stacked_cells_split_correctly,
     test_combined_split_does_not_shift_adjacent_columns,
@@ -705,6 +737,7 @@ TESTS = [
     test_schedule_title_pages_preferred_over_keyword_only_pages,
     test_falls_back_to_keyword_pages_when_no_title_matches,
     test_see_schedule_reference_is_not_a_title,
+    test_long_retry_after_raises_instead_of_sleeping,
 ]
 
 

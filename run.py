@@ -27,7 +27,7 @@ from typing import List
 import config
 import db
 import export_csv
-from extract import extract_pdf
+from extract import GroqRateLimited, extract_pdf
 
 
 def sha256(path: Path) -> str:
@@ -111,7 +111,21 @@ def main() -> int:
             break
 
         print(f"[{i}/{len(pdfs)}] {path.name} ...", flush=True)
-        result = extract_pdf(str(path))
+        try:
+            result = extract_pdf(str(path))
+        except GroqRateLimited as exc:
+            # Every remaining file would hit the same wall, so stop rather than
+            # grind through the rest producing nothing. Whatever finished stays
+            # in the database and is skipped on the next run.
+            print(f"\nSTOPPING: {exc}", file=sys.stderr)
+            print("  Processed files are saved; re-run later to continue.",
+                  file=sys.stderr)
+            break
+        except RuntimeError as exc:
+            if "401" in str(exc):
+                print(f"\nSTOPPING: {exc}", file=sys.stderr)
+                break
+            raise
         n_rows = len(result.equipment or [])
         db.record_result(
             conn,
